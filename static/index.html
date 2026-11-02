@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HelpLoop</title>
+<style>
+:root{--bd:#e6e6e6;--mut:#777;--acc:#2f5bea}
+*{box-sizing:border-box}
+body{margin:0;height:100vh;font:14px/1.45 system-ui,sans-serif;color:#1b1b1b;display:flex}
+input,button,select{font:inherit;padding:8px 10px;border:1px solid var(--bd);border-radius:6px}
+button{background:#111;color:#fff;border-color:#111;cursor:pointer}
+button.ghost{background:none;color:inherit;border-color:var(--bd)}
+#auth{margin:auto;width:300px;display:flex;flex-direction:column;gap:8px}
+#auth h1{margin:0;font-size:22px}#err{color:#c0392b;min-height:18px}
+#app{display:none;width:100%}
+aside{width:250px;border-right:1px solid var(--bd);padding:14px;overflow:auto}
+aside h4{margin:16px 0 4px;font-size:11px;text-transform:uppercase;color:var(--mut);letter-spacing:.05em}
+.item{padding:6px 8px;border-radius:6px;cursor:pointer;display:flex;align-items:center;gap:8px}
+.item:hover,.item.on{background:#f1f3f8}
+.dot{width:8px;height:8px;border-radius:50%;background:#ccc;flex:none}.dot.on{background:#27ae60}
+.badge{margin-left:auto;background:var(--acc);color:#fff;border-radius:10px;padding:0 7px;font-size:11px}
+main{flex:1;display:flex;flex-direction:column;min-width:0}
+header{padding:12px 18px;border-bottom:1px solid var(--bd);display:flex;gap:12px;align-items:center}
+header b{flex:1}header input{width:200px}
+#msgs{flex:1;overflow:auto;padding:14px 18px}
+.m{margin-bottom:10px;word-break:break-word}.m small{color:var(--mut);margin:0 6px}
+.m.sys{background:#fff4e5;padding:8px;border-radius:6px}
+#meta{height:22px;padding:0 18px;color:var(--mut);font-size:12px;display:flex;justify-content:space-between}
+footer{padding:12px 18px;border-top:1px solid var(--bd);display:flex;gap:8px}
+footer #in{flex:1}
+</style></head><body>
+<div id="auth">
+  <h1>HelpLoop</h1><div style="color:#777">Support chat for your team and customers</div>
+  <input id="email" placeholder="Email"><input id="pw" type="password" placeholder="Password">
+  <button onclick="auth('login')">Sign in</button>
+  <hr style="width:100%;border:0;border-top:1px solid #eee">
+  <input id="name" placeholder="Your name (new account)">
+  <select id="role"><option value="customer">I'm a customer</option><option value="agent">I'm a support agent</option></select>
+  <input id="extra" placeholder="Company name">
+  <button class="ghost" onclick="auth('register')">Create account</button><div id="err"></div>
+</div>
+<div id="app">
+  <aside>
+    <div><b id="me"></b></div>
+    <h4>Channels <button id="newch" class="ghost" style="display:none;padding:0 6px;float:right">+</button></h4><div id="chs"></div>
+    <h4>People</h4><div id="ppl"></div>
+  </aside>
+  <main>
+    <header><b id="title">Select a conversation</b><input id="q" placeholder="Search messages ⏎"></header>
+    <div id="msgs"></div>
+    <div id="meta"><span id="typing"></span><span id="seen"></span></div>
+    <footer><input id="in" placeholder="Message…" autocomplete="off"><label class="ghost" style="cursor:pointer;padding:8px">📎<input id="file" type="file" hidden></label><button onclick="send()">Send</button></footer>
+  </main>
+</div>
+<script>
+const $=s=>document.querySelector(s);
+const h=(t,c,x)=>{const e=document.createElement(t);if(c)e.className=c;if(x!=null)e.textContent=x;return e};
+let T=localStorage.t,ME,CH=[],cur=null,ws,online=new Set(),users={},reads={},lastMine=0,typingT,lastTyping=0;
+const api=async(p,o={})=>{const hd={Authorization:'Bearer '+T};
+  if(o.body&&!(o.body instanceof FormData))hd['Content-Type']='application/json';
+  const r=await fetch(p,{...o,headers:hd});const d=await r.json().catch(()=>({}));
+  if(!r.ok)throw new Error(d.detail||r.statusText);return d};
+const wsend=o=>ws&&ws.readyState==1&&ws.send(JSON.stringify(o));
+$('#role').onchange=e=>$('#extra').placeholder=e.target.value=='customer'?'Company name':'Agent invite code (demo: agent-demo)';
+
+async function auth(kind){
+  const b={email:$('#email').value,password:$('#pw').value};
+  if(kind=='register'){b.name=$('#name').value;b.role=$('#role').value;if(b.role=='customer')b.org=$('#extra').value;else b.invite=$('#extra').value}
+  try{const r=await fetch('/auth/'+kind,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});
+    const d=await r.json();if(!r.ok)throw new Error(typeof d.detail=='string'?d.detail:'Please check your details');
+    T=d.token;localStorage.t=T;start()}catch(e){$('#err').textContent=e.message}}
+
+async function refreshUsers(){users={};(await api('/users')).forEach(u=>users[u.id]=u)}
+async function loadChannels(){CH=await api('/channels');const c=CH.find(x=>x.id==cur);if(c)c.unread=0;drawCh()}
+async function start(){
+  try{ME=await api('/me')}catch{localStorage.removeItem('t');return}
+  $('#auth').style.display='none';$('#app').style.display='flex';
+  $('#me').textContent=ME.name+(ME.org?' · '+ME.org:' · agent');
+  $('#newch').style.display=ME.role=='agent'?'':'none';
+  await refreshUsers();(await api('/presence')).forEach(i=>online.add(i));
+  await loadChannels();connect();
+  if('Notification' in window)Notification.requestPermission();
+}
+function connect(){
+  ws=new WebSocket((location.protocol=='https:'?'wss://':'ws://')+location.host+'/ws?token='+T);
+  ws.onmessage=e=>on(JSON.parse(e.data));ws.onclose=()=>setTimeout(connect,2000);
+}
+function on(ev){
+  if(ev.type=='message'){
+    if(ev.channel_id==cur){add(ev);if(ev.user_id!=ME.id)markRead(ev)}
+    else{const c=CH.find(x=>x.id==ev.channel_id);if(c&&ev.user_id!=ME.id){c.unread++;drawCh()}}
+    if(ev.user_id!=ME.id&&(document.hidden||ev.channel_id!=cur)&&window.Notification&&Notification.permission=='granted')new Notification(ev.name,{body:ev.body||ev.file_name});
+  }else if(ev.type=='typing'&&ev.channel_id==cur&&ev.user_id!=ME.id){
+    $('#typing').textContent=ev.name+' is typing…';clearTimeout(typingT);typingT=setTimeout(()=>$('#typing').textContent='',2500);
+  }else if(ev.type=='presence'){
+    ev.online?online.add(ev.user_id):online.delete(ev.user_id);
+    if(!users[ev.user_id])refreshUsers().then(drawCh);else drawCh();
+  }else if(ev.type=='read'&&ev.channel_id==cur){reads[ev.user_id]=ev;drawSeen()}
+  else if(ev.type=='channel_added'){loadChannels();refreshUsers()}
+  else if(ev.type=='sla'&&ev.channel_id==cur){$('#msgs').append(h('div','m sys','⏱ SLA breached: '+ev.org+' is still waiting for a reply'))}
+}
+function drawCh(){
+  const el=$('#chs');el.replaceChildren();
+  CH.forEach(c=>{const d=h('div','item'+(c.id==cur?' on':''));
+    d.append(c.kind=='dm'?h('span','dot'+(online.has(c.peer)?' on':'')):h('span',0,'#'),h('span',0,c.name));
+    if(c.unread)d.append(h('span','badge',c.unread));d.onclick=()=>open(c.id);el.append(d)});
+  const p=$('#ppl');p.replaceChildren();
+  Object.values(users).filter(u=>u.id!=ME.id).forEach(u=>{const d=h('div','item');
+    d.append(h('span','dot'+(online.has(u.id)?' on':'')),h('span',0,u.name+(u.org?' · '+u.org:'')));
+    d.onclick=async()=>{const r=await api('/channels/dm',{method:'POST',body:JSON.stringify({user_id:u.id})});await loadChannels();open(r.id)};p.append(d)});
+}
+function add(m){
+  const box=$('#msgs'),d=h('div','m'),top=h('div');
+  top.append(h('b',0,m.name),h('small',0,new Date(m.at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})));d.append(top);
+  if(m.body)d.append(h('div',0,m.body));
+  if(m.file_url){const a=h('a',0,'📎 '+(m.file_name||'file'));a.href=m.file_url+'?token='+T;a.target='_blank';d.append(a)}
+  if(m.user_id==ME.id){lastMine=m.id;drawSeen()}
+  box.append(d);box.scrollTop=box.scrollHeight;
+}
+function drawSeen(){
+  const n=lastMine?Object.values(reads).filter(r=>r.user_id!=ME.id&&r.last_read>=lastMine).map(r=>r.name):[];
+  $('#seen').textContent=n.length?'Seen by '+n.join(', '):'';
+}
+async function open(id){
+  cur=id;const c=CH.find(x=>x.id==id);c.unread=0;drawCh();
+  $('#title').textContent=(c.kind=='dm'?'@ ':'# ')+c.name;
+  const d=await api(`/channels/${id}/messages`);
+  $('#msgs').replaceChildren();lastMine=0;reads={};d.reads.forEach(r=>reads[r.user_id]=r);
+  d.messages.forEach(add);drawSeen();$('#typing').textContent='';
+  const l=d.messages.at(-1);if(l&&l.user_id!=ME.id)markRead(l);
+}
+const markRead=m=>wsend({type:'read',channel_id:cur,message_id:m.id});
+function send(extra={}){
+  const b=$('#in').value.trim();if(!cur||(!b&&!extra.file_url))return;
+  wsend({type:'message',channel_id:cur,body:b,...extra});$('#in').value='';
+}
+$('#in').oninput=()=>{if(cur&&Date.now()-lastTyping>1500){lastTyping=Date.now();wsend({type:'typing',channel_id:cur})}};
+$('#in').onkeydown=e=>{if(e.key=='Enter')send()};
+$('#file').onchange=async e=>{if(!cur||!e.target.files[0])return;const f=new FormData();f.append('f',e.target.files[0]);
+  try{send(await api('/files',{method:'POST',body:f}))}catch(x){alert(x.message)}e.target.value=''};
+$('#newch').onclick=async()=>{const n=prompt('Channel name');if(n)await api('/channels',{method:'POST',body:JSON.stringify({name:n})})};
+$('#q').onkeydown=async e=>{if(e.key!='Enter')return;const q=e.target.value.trim();if(!q)return;
+  const r=await api('/search?q='+encodeURIComponent(q));cur=null;drawCh();
+  $('#title').textContent='Search: '+q;$('#msgs').replaceChildren();
+  if(!r.length)$('#msgs').append(h('div','m','No results'));
+  r.forEach(m=>{add(m);const d=$('#msgs').lastChild;d.style.cursor='pointer';
+    d.prepend(h('small',0,'in '+((CH.find(c=>c.id==m.channel_id)||{}).name||'?')));d.onclick=()=>open(m.channel_id)})};
+if(T)start();
+</script></body></html>
